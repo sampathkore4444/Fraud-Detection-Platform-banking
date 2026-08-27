@@ -1,0 +1,44 @@
+{
+  "namespace": "com.bank.fraud.features",
+  "type": "record",
+  "name": "FeatureVector",
+  "doc": "Assembled feature vector combining velocity, behavioral, and device features",
+  "fields": [
+    { "name": "transaction_id", "type": "string" },
+    { "name": "account_id", "type": "string" },
+    { "name": "computed_at_ms", "type": "long", "doc": "Timestamp when features were computed" },
+
+    { "name": "velocity_tx_count_1h", "type": "int", "doc": "Transaction count in last 1 hour" },
+    { "name": "velocity_tx_count_24h", "type": "int", "doc": "Transaction count in last 24 hours" },
+    { "name": "velocity_amount_sum_1h", "type": "double", "doc": "Sum of amounts in last 1 hour" },
+    { "name": "velocity_amount_sum_24h", "type": "double", "doc": "Sum of amounts in last 24 hours" },
+    { "name": "velocity_decline_count_24h", "type": "int", "doc": "Declined transaction count in last 24h" },
+    { "name": "velocity_unique_countries_1h", "type": "int", "doc": "Distinct countries in last 1 hour" },
+    { "name": "velocity_unique_merchants_24h", "type": "int", "doc": "Distinct merchants in last 24 hours" },
+    { "name": "velocity_avg_amount_7d", "type": "double", "doc": "Average amount over last 7 days" },
+    { "name": "velocity_stddev_amount_7d", "type": "double", "doc": "Stddev of amounts over last 7 days" },
+    { "name": "velocity_time_since_last_tx", "type": "long", "doc": "Seconds since last transaction" },
+
+    { "name": "behavioral_typical_amount_ratio", "type": "double", "doc": "current_amount / avg_amount_7d" },
+    { "name": "behavioral_typical_hour_score", "type": "double", "doc": "P(hour_of_day | account history)" },
+    { "name": "behavioral_typical_day_score", "type": "double", "doc": "P(day_of_week | account history)" },
+    { "name": "behavioral_merchant_category_diversity", "type": "int", "doc": "Unique MCC count in last 30d" },
+    { "name": "behavioral_amount_zscore", "type": "double", "doc": "Z-score against account history" },
+    { "name": "behavioral_is_recipient_new", "type": "int", "doc": "First-time recipient (0/1)" },
+    { "name": "behavioral_velocity_direction", "type": "double", "doc": "Inflow vs outflow ratio 7d" },
+    { "name": "behavioral_time_between_tx_stddev", "type": "double", "doc": "Stddev of inter-tx intervals" },
+    { "name": "behavioral_country_change_freq", "type": "double", "doc": "Country changes per day over 30d" },
+    { "name": "behavioral_night_tx_ratio", "type": "double", "doc": "Ratio of transactions between 23:00-05:00" },
+
+    { "name": "device_is_known", "type": "int", "doc": "Device seen in last 90d (0/1)" },
+    { "name": "device_last_seen_hours_ago", "type": "double", "doc": "Hours since device last used" },
+    { "name": "device_unique_accounts_24h", "type": "int", "doc": "Distinct accounts on same device 24h" },
+    { "name": "device_is_emulator_detected", "type": "int", "doc": "Known emulator fingerprint (0/1)" },
+    { "name": "device_rooted_jailbroken", "type": "int", "doc": "Rooted/jailbroken signal (0/1)" },
+    { "name": "device_ip_country_match", "type": "int", "doc": "IP country == tx country (0/1)" },
+    { "name": "device_ip_is_vpn", "type": "int", "doc": "VPN/proxy detected (0/1)" },
+    { "name": "device_browser_fingerprint_match", "type": "int", "doc": "Fingerprint matches known (0/1)" },
+    { "name": "device_latency_anomaly", "type": "int", "doc": "API response time anomaly (0/1)" },
+    { "name": "device_is_new_os_version", "type": "int", "doc": "OS version changed (0/1)" }
+  ]
+}

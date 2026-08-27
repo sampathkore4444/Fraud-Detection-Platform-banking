@@ -1,0 +1,268 @@
+# ── CI/CD Pipeline ────────────────────────────────────────────
+# Per SPEC §9: PR → Lint → Unit Tests → Type Check → Build Docker →
+# Integration Tests → Load Tests → Canary Deploy → Promote
+
+name: Fraud Detection CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository }}
+
+jobs:
+  # ── Stage 1: Lint ─────────────────────────────────────────
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python linting tools
+        run: pip install ruff mypy black isort
+
+      - name: Lint Python code
+        run: |
+          ruff check flink-jobs/ ml-pipeline/ feature-engineering/ tests/
+          black --check flink-jobs/ ml-pipeline/ feature-engineering/ tests/
+          isort --check-only flink-jobs/ ml-pipeline/ feature-engineering/ tests/
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+
+      - name: Lint Go code
+        uses: golangci/golangci-lint-action@v3
+        with:
+          version: latest
+          working-directory: fraud-service
+
+  # ── Stage 2: Unit Tests ───────────────────────────────────
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          pip install xgboost scikit-learn pandas numpy scipy redis
+
+      - name: Run Python unit tests
+        run: |
+          python -m pytest tests/unit/ -v --tb=short --junitxml=test-results/unit-tests.xml
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-test-results
+          path: test-results/
+
+  # ── Stage 3: Build Docker Images ──────────────────────────
+  build:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Fraud Service
+        uses: docker/build-push-action@v5
+        with:
+          context: fraud-service
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/fraud-service:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/fraud-service:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push Flink Jobs
+        uses: docker/build-push-action@v5
+        with:
+          context: flink-jobs
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/flink-jobs:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/flink-jobs:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── Stage 4: Integration Tests ────────────────────────────
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: build
+    services:
+      redis:
+        image: redis:7.2-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install xgboost scikit-learn pandas numpy scipy redis
+
+      - name: Run integration tests
+        env:
+          REDIS_HOST: localhost
+          REDIS_PORT: 6379
+        run: |
+          python -m pytest tests/integration/ -v --tb=short
+
+  # ── Stage 5: Load Tests ───────────────────────────────────
+  load-tests:
+    name: Load Tests
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D68
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install k6
+
+      - name: Run load tests
+        run: |
+          k6 run tests/load/k6_load_test.js \
+            --out json=tests/load/load_results.json \
+            --summary-export=tests/load/summary.json
+
+      - name: Upload load test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: load-test-results
+          path: tests/load/
+
+  # ── Stage 6: Deploy to Staging ────────────────────────────
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [integration-tests, load-tests]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: "v3.13.0"
+
+      - name: Configure kubectl
+        uses: azure/k8s-set-context@v3
+        with:
+          kubeconfig: ${{ secrets.KUBE_CONFIG_STAGING }}
+
+      - name: Deploy to staging
+        run: |
+          helm upgrade --install fraud-detection \
+            infra/kubernetes/charts/fraud-detection \
+            --namespace fraud-detection \
+            --create-namespace \
+            --set global.environment=staging \
+            --set fraudService.image.tag=${{ github.sha }} \
+            --set flink.image.tag=${{ github.sha }} \
+            --wait --timeout 300s
+
+      - name: Run smoke tests
+        run: |
+          python tests/integration/test_smoke.py --env staging
+
+  # ── Stage 7: Deploy to Production (Canary) ────────────────
+  deploy-production-canary:
+    name: Deploy to Production (Canary 5%)
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy canary (5% traffic)
+        run: |
+          helm upgrade --install fraud-detection-canary \
+            infra/kubernetes/charts/fraud-detection \
+            --namespace fraud-detection \
+            --set global.environment=production \
+            --set global.canary=true \
+            --set fraudService.replicaCount=1 \
+            --set fraudService.image.tag=${{ github.sha }} \
+            --wait --timeout 300s
+
+      - name: Monitor canary for 10 minutes
+        run: |
+          echo "Monitoring canary deployment..."
+          sleep 600
+          # Check error rate and latency
+          # Automated rollback if error rate > 1% or latency p99 > 200ms
+
+  # ── Stage 8: Promote to Production ────────────────────────
+  deploy-production:
+    name: Deploy to Production (100%)
+    runs-on: ubuntu-latest
+    needs: deploy-production-canary
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Promote to production
+        run: |
+          helm upgrade --install fraud-detection \
+            infra/kubernetes/charts/fraud-detection \
+            --namespace fraud-detection \
+            --set global.environment=production \
+            --set fraudService.image.tag=${{ github.sha }} \
+            --set flink.image.tag=${{ github.sha }} \
+            --wait --timeout 300s
+
+      - name: Post-deploy monitoring
+        run: |
+          echo "Post-deploy monitoring for 10 minutes..."
+          sleep 600

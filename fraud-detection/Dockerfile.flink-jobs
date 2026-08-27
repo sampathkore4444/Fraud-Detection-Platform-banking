@@ -1,0 +1,31 @@
+# ── Flink Jobs Dockerfile ─────────────────────────────────────
+# Based on official Flink image with Python dependencies
+
+FROM flink:1.18-java17-python3
+
+# Install Python dependencies
+USER root
+
+RUN pip install --no-cache-dir \
+    redis \
+    confluent-kafka \
+    xgboost \
+    scikit-learn \
+    pandas \
+    numpy \
+    scipy
+
+# Copy job code
+RUN mkdir -p /opt/flink/usrlib
+COPY flink-jobs/ /opt/flink/usrlib/flink-jobs/
+
+# Copy schemas
+COPY feature-engineering/schemas/ /opt/flink/usrlib/schemas/
+
+# Copy proto definitions (for gRPC client)
+COPY fraud-service/proto/ /opt/flink/usrlib/proto/
+
+# Set permissions
+RUN chown -R flink:flink /opt/flink/usrlib
+
+USER flink

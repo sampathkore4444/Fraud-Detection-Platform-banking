@@ -1,0 +1,149 @@
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkDeployment
+metadata:
+  name: fraud-flink-pipeline
+  namespace: fraud-detection
+spec:
+  image: fraud-flink-jobs:latest
+  flinkVersion: v1_18
+  flinkConfiguration:
+    # Per SPEC §5.2
+    state.backend: rocksdb
+    state.backend.incremental: "true"
+    state.checkpoints.dir: s3://fraud-detection-flink/checkpoints
+    state.savepoints.dir: s3://fraud-detection-flink/savepoints
+    state.checkpoints.num-retained: "3"
+    execution.checkpointing.interval: "30000"
+    execution.checkpointing.mode: EXACTLY_ONCE
+    execution.checkpointing.min-pause: "10000"
+    execution.checkpointing.timeout: "60000"
+    restart-strategy: fixed-delay
+    restart-strategy.fixed-delay.attempts: "3"
+    restart-strategy.fixed-delay.delay: "30s"
+    metrics.reporters: prom
+    metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+    metrics.reporter.prom.port: "9249"
+    # RocksDB tuning
+    state.backend.rocksdb.memory.managed: "true"
+    state.backend.rocksdb.memory.fixed-per-slot: "256mb"
+  serviceAccount: flink
+  jobManager:
+    resource:
+      memory: "2048m"
+      cpu: 1
+  taskManager:
+    resource:
+      memory: "4096m"
+      cpu: 2
+    replicas: 4
+  job:
+    jarURI: local:///opt/flink/usrlib/fraud-flink-jobs.jar
+    entryClass: com.bank.fraud.pipeline.FraudPipeline
+    parallelism: 8
+    upgradeMode: savepoint
+    allowNonRestoredSavepoint: true
+---
+# Velocity Features Job
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkDeployment
+metadata:
+  name: fraud-velocity-features
+  namespace: fraud-detection
+spec:
+  image: fraud-flink-jobs:latest
+  flinkVersion: v1_18
+  flinkConfiguration:
+    state.backend: rocksdb
+    state.backend.incremental: "true"
+    state.checkpoints.dir: s3://fraud-detection-flink/checkpoints/velocity
+    execution.checkpointing.interval: "30000"
+    execution.checkpointing.mode: EXACTLY_ONCE
+    restart-strategy: fixed-delay
+    restart-strategy.fixed-delay.attempts: "3"
+    restart-strategy.fixed-delay.delay: "30s"
+  serviceAccount: flink
+  jobManager:
+    resource:
+      memory: "2048m"
+      cpu: 1
+  taskManager:
+    resource:
+      memory: "4096m"
+      cpu: 2
+    replicas: 4
+  job:
+    jarURI: local:///opt/flink/usrlib/fraud-flink-jobs.jar
+    entryClass: com.bank.fraud.velocity.VelocityFeatures
+    parallelism: 16
+    upgradeMode: savepoint
+    allowNonRestoredSavepoint: true
+---
+# Behavioral Features Job
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkDeployment
+metadata:
+  name: fraud-behavioral-features
+  namespace: fraud-detection
+spec:
+  image: fraud-flink-jobs:latest
+  flinkVersion: v1_18
+  flinkConfiguration:
+    state.backend: rocksdb
+    state.backend.incremental: "true"
+    state.checkpoints.dir: s3://fraud-detection-flink/checkpoints/behavioral
+    execution.checkpointing.interval: "30000"
+    execution.checkpointing.mode: EXACTLY_ONCE
+    restart-strategy: fixed-delay
+    restart-strategy.fixed-delay.attempts: "3"
+    restart-strategy.fixed-delay.delay: "30s"
+  serviceAccount: flink
+  jobManager:
+    resource:
+      memory: "2048m"
+      cpu: 1
+  taskManager:
+    resource:
+      memory: "4096m"
+      cpu: 2
+    replicas: 4
+  job:
+    jarURI: local:///opt/flink/usrlib/fraud-flink-jobs.jar
+    entryClass: com.bank.fraud.behavioral.BehavioralFeatures
+    parallelism: 16
+    upgradeMode: savepoint
+    allowNonRestoredSavepoint: true
+---
+# Device Features Job
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkDeployment
+metadata:
+  name: fraud-device-features
+  namespace: fraud-detection
+spec:
+  image: fraud-flink-jobs:latest
+  flinkVersion: v1_18
+  flinkConfiguration:
+    state.backend: rocksdb
+    state.backend.incremental: "true"
+    state.checkpoints.dir: s3://fraud-detection-flink/checkpoints/device
+    execution.checkpointing.interval: "30000"
+    execution.checkpointing.mode: EXACTLY_ONCE
+    restart-strategy: fixed-delay
+    restart-strategy.fixed-delay.attempts: "3"
+    restart-strategy.fixed-delay.delay: "30s"
+  serviceAccount: flink
+  jobManager:
+    resource:
+      memory: "2048m"
+      cpu: 1
+  taskManager:
+    resource:
+      memory: "4096m"
+      cpu: 2
+    replicas: 2
+  job:
+    jarURI: local:///opt/flink/usrlib/fraud-flink-jobs.jar
+    entryClass: com.bank.fraud.device.DeviceFeatures
+    parallelism: 8
+    upgradeMode: savepoint
+    allowNonRestoredSavepoint: true

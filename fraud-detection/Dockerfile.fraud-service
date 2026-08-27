@@ -1,0 +1,42 @@
+# ── Fraud Service Dockerfile ──────────────────────────────────
+# Multi-stage build for minimal production image
+
+# Stage 1: Build
+FROM golang:1.21-alpine AS builder
+
+WORKDIR /app
+
+# Download dependencies
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source
+COPY . .
+
+# Build
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /fraud-service ./cmd/server
+
+# Stage 2: Production
+FROM alpine:3.19
+
+RUN apk --no-cache add ca-certificates tzdata
+
+# Non-root user per security best practices
+RUN addgroup -S fraud && adduser -S fraud -G fraud
+
+WORKDIR /app
+
+# Copy binary
+COPY --from=builder /fraud-service /app/fraud-service
+
+# Copy config
+COPY --from=builder /app/api/swagger.json /app/api/
+
+# Copy models directory (will be overridden by volume mount in K8s)
+RUN mkdir -p /models && chown -R fraud:fraud /models
+
+USER fraud
+
+EXPOSE 50051 9090
+
+ENTRYPOINT ["/app/fraud-service"]

@@ -1,0 +1,192 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Fraud Detection Scoring API",
+    "description": "REST API gateway for the Fraud Detection Scoring Service. For low-latency production use, prefer the gRPC endpoint on port 50051.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8080",
+      "description": "Local development"
+    }
+  ],
+  "paths": {
+    "/api/v1/score": {
+      "post": {
+        "summary": "Score a transaction for fraud",
+        "operationId": "scoreTransaction",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScoreRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Scoring result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScoreResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "500": {
+            "description": "Internal error"
+          }
+        }
+      }
+    },
+    "/api/v1/decision/{transactionId}": {
+      "get": {
+        "summary": "Get decision for a transaction",
+        "operationId": "getDecision",
+        "parameters": [
+          {
+            "name": "transactionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Decision found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecisionResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Decision not found"
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Health check",
+        "operationId": "healthCheck",
+        "responses": {
+          "200": {
+            "description": "Service healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ScoreRequest": {
+        "type": "object",
+        "required": ["transaction_id", "features"],
+        "properties": {
+          "transaction_id": {
+            "type": "string",
+            "description": "Unique transaction identifier"
+          },
+          "features": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Key-value feature vector"
+          },
+          "model_version": {
+            "type": "string",
+            "description": "Optional model version for canary routing"
+          },
+          "timestamp_ms": {
+            "type": "integer",
+            "description": "Event timestamp in milliseconds"
+          }
+        }
+      },
+      "ScoreResponse": {
+        "type": "object",
+        "properties": {
+          "transaction_id": {
+            "type": "string"
+          },
+          "decision": {
+            "type": "string",
+            "enum": ["APPROVE", "REVIEW", "DECLINE"]
+          },
+          "fraud_probability": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "model_version": {
+            "type": "string"
+          },
+          "latency_ms": {
+            "type": "integer"
+          },
+          "top_features": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            }
+          },
+          "reason_code": {
+            "type": "string"
+          }
+        }
+      },
+      "DecisionResponse": {
+        "type": "object",
+        "properties": {
+          "transaction_id": {
+            "type": "string"
+          },
+          "decision": {
+            "type": "string",
+            "enum": ["APPROVE", "REVIEW", "DECLINE"]
+          },
+          "reason_code": {
+            "type": "string"
+          },
+          "timestamp_ms": {
+            "type": "integer"
+          },
+          "fraud_probability": {
+            "type": "number"
+          }
+        }
+      },
+      "HealthResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

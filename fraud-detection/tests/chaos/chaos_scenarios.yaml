@@ -1,0 +1,160 @@
+# ── Chaos Test Scenarios ──────────────────────────────────────
+# Per SPEC §8: Chaos tests — Redis node failure, Flink taskmanager crash
+# Tool: Litmus Chaos or Chaos Mesh on Kubernetes
+
+scenarios:
+  # ── Scenario 1: Redis Node Failure ─────────────────────────
+  - name: "redis-node-failure"
+    description: "Simulate Redis node unavailability"
+    spec:
+      action: pod-delete
+      target:
+        app: fraud-redis
+        namespace: fraud-detection
+      duration: 60s
+      expected:
+        - fraud-service-decision-latency-p99 < 200ms  # degraded but functional
+        - fraud-service-error-rate < 5%
+        - pipeline-continues-processing: true
+      recovery:
+        action: pod-recreate
+        timeout: 30s
+
+  # ── Scenario 2: Flink TaskManager Crash ────────────────────
+  - name: "flink-taskmanager-crash"
+    description: "Simulate Flink TaskManager failure"
+    spec:
+      action: pod-kill
+      target:
+        app: flink-taskmanager
+        namespace: fraud-detection
+        random: true
+      expected:
+        - flink-job-restarts: true
+        - flink-checkpoint-recovery: < 30s
+        - data-loss: none  # exactly-once semantics
+      recovery:
+        action: auto
+        timeout: 30s  # restart-strategy.fixed-delay.delay
+
+  # ── Scenario 3: Kafka Broker Failure ──────────────────────
+  - name: "kafka-broker-failure"
+    description: "Simulate Kafka broker unavailability"
+    spec:
+      action: pod-delete
+      target:
+        app: kafka
+        namespace: fraud-detection
+      expected:
+        - flink-consumer-failover: true
+        - flink-consumer-lag-increase: temporary
+        - no-data-loss: true
+      recovery:
+        action: pod-recreate
+        timeout: 60s
+
+  # ── Scenario 4: Fraud Service Overload ────────────────────
+  - name: "fraud-service-overload"
+    description: "Simulate fraud service resource exhaustion"
+    spec:
+      action: stress-ng
+      target:
+        app: fraud-service
+        namespace: fraud-detection
+      config:
+        cpu: 8
+        memory: 4GB
+        duration: 120s
+      expected:
+        - fraud-service-latency-p99: < 200ms
+        - fraud-service-error-rate: < 10%
+        - pipeline-fallback-to-review: true
+      recovery:
+        action: stop-stress
+        timeout: 10s
+
+  # ── Scenario 5: Network Partition ──────────────────────────
+  - name: "network-partition-redis"
+    description: "Network partition between fraud-service and Redis"
+    spec:
+      action: network-partition
+      source:
+        app: fraud-service
+      target:
+        app: fraud-redis
+      duration: 30s
+      expected:
+        - fraud-service-falls-back: true
+        - uses-default-features: true
+        - decisions-default-to-review: true
+      recovery:
+        action: network-heal
+        timeout: 10s
+
+  # ── Scenario 6: Kafka Topic Unavailable ────────────────────
+  - name: "kafka-topic-unavailable"
+    description: "Simulate payments.raw.v1 topic unavailability"
+    spec:
+      action: topic-delete
+      topic: payments.raw.v1
+      expected:
+        - flink-job-fails: true
+        - flink-job-restarts: true
+        - alert-triggered: true
+      recovery:
+        action: topic-create
+        topic: payments.raw.v1
+        timeout: 30s
+
+  # ── Scenario 7: High Memory Pressure ──────────────────────
+  - name: "redis-memory-pressure"
+    description: "Simulate Redis memory pressure"
+    spec:
+      action: memory-fill
+      target:
+        app: fraud-redis
+      config:
+        fill-to-percent: 95
+      expected:
+        - redis-evicts-oldest-keys: true
+        - feature-cache-miss-rate: increases
+        - fraud-service-handles-gracefully: true
+      recovery:
+        action: memory-release
+        timeout: 10s
+
+  # ── Scenario 8: Clock Skew ────────────────────────────────
+  - name: "clock-skew-flink"
+    description: "Simulate clock skew on Flink TaskManager"
+    spec:
+      action: clock-skew
+      target:
+        app: flink-taskmanager
+      config:
+        offset: 300s  # 5 minute skew
+      expected:
+        - watermark-computation-affected: true
+        - window-boundaries-adjust: true
+        - no-data-loss: true
+      recovery:
+        action: clock-reset
+        timeout: 10s
+
+# ── Run Configuration ────────────────────────────────────────
+
+run_config:
+  # Run all scenarios sequentially
+  mode: sequential
+
+  # Pause between scenarios
+  pause_between: 60s
+
+  # Alert on failure
+  alert_on_failure: true
+
+  # Report generation
+  report_format: json
+  report_path: tests/chaos/reports/
+
+  # Minimum pass rate
+  min_pass_rate: 0.8  # 80% of scenarios must pass

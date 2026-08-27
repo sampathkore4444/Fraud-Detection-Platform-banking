@@ -1,0 +1,67 @@
+syntax = "proto3";
+
+package fraud.v1;
+
+option go_package = "github.com/bank/fraud-detection/fraud-service/proto;fraudpb";
+
+// ── Service Definition ──────────────────────────────────────
+
+service FraudScoringService {
+  // Score a transaction using the feature vector and XGBoost model
+  rpc ScoreTransaction(ScoreRequest) returns (ScoreResponse);
+
+  // Retrieve a previously computed decision
+  rpc GetDecision(StringRequest) returns (DecisionResponse);
+
+  // Health check with model version info
+  rpc HealthCheck(Empty) returns (HealthResponse);
+
+  // Stream multiple transactions for batch scoring
+  rpc ScoreBatch(stream ScoreRequest) returns (stream ScoreResponse);
+}
+
+// ── Messages ────────────────────────────────────────────────
+
+message ScoreRequest {
+  string transaction_id = 1;
+  map<string, string> features = 2;    // key-value feature vector
+  string model_version = 3;            // optional: for canary routing
+  int64 timestamp_ms = 4;              // event timestamp
+}
+
+message ScoreResponse {
+  string transaction_id = 1;
+  Decision decision = 2;
+  double fraud_probability = 3;        // 0.0 – 1.0
+  string model_version = 4;
+  int64 latency_ms = 5;
+  map<string, double> top_features = 6; // SHAP or feature importance
+  string reason_code = 7;              // e.g. "VELOCITY_BURST", "NEW_DEVICE"
+}
+
+enum Decision {
+  APPROVE = 0;
+  REVIEW = 1;
+  DECLINE = 2;
+}
+
+message DecisionResponse {
+  string transaction_id = 1;
+  Decision decision = 2;
+  string reason_code = 3;
+  int64 timestamp_ms = 4;
+  double fraud_probability = 5;
+}
+
+message StringRequest {
+  string value = 1;
+}
+
+message Empty {}
+
+message HealthResponse {
+  bool healthy = 1;
+  string model_version = 2;
+  int64 model_loaded_at_ms = 3;
+  int64 uptime_seconds = 4;
+}

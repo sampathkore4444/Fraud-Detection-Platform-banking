@@ -1,0 +1,54 @@
+# ── Flink Configuration for Fraud Detection ──────────────────
+# Reference: SPEC §5.2
+
+# JobManager
+jobmanager.rpc.address: flink-jobmanager
+jobmanager.rpc.port: 6123
+jobmanager.memory.process.size: 2048m
+jobmanager.execution.failover-strategy: region
+
+# TaskManager
+taskmanager.memory.process.size: 4096m
+taskmanager.numberOfTaskSlots: 4
+taskmanager.memory.managed.fraction: 0.4
+
+# State Backend (RocksDB)
+state.backend: rocksdb
+state.backend.incremental: true
+state.checkpoints.dir: s3://fraud-detection-flink/checkpoints
+state.savepoints.dir: s3://fraud-detection-flink/savepoints
+state.checkpoints.num-retained: 3
+
+# RocksDB tuning
+state.backend.rocksdb.memory.managed: true
+state.backend.rocksdb.memory.fixed-per-slot: 256mb
+state.backend.rocksdb.memory.disable-bloom-filter: false
+state.backend.rocksdb.block.cache-size: 128mb
+state.backend.rocksdb.writebuffer.count: 4
+state.backend.rocksdb.writebuffer.size: 64mb
+
+# Checkpointing
+execution.checkpointing.interval: 30s
+execution.checkpointing.mode: EXACTLY_ONCE
+execution.checkpointing.min-pause: 10s
+execution.checkpointing.timeout: 600s
+execution.checkpointing.max-concurrent-checkpoints: 1
+execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
+
+# Restart Strategy
+restart-strategy: fixed-delay
+restart-strategy.fixed-delay.attempts: 3
+restart-strategy.fixed-delay.delay: 30s
+
+# Parallelism
+parallelism.default: 8
+
+# Network
+taskmanager.network.memory.fraction: 0.1
+taskmanager.network.memory.min: 64mb
+taskmanager.network.memory.max: 1gb
+taskmanager.network.numberOfBuffers: 4096
+
+# Web UI
+web.submit.enable: true
+web.upload.dir: /opt/flink/usrlib

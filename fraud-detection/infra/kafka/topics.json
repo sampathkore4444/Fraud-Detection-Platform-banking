@@ -1,0 +1,46 @@
+{
+  "topics": [
+    {
+      "name": "payments.raw.v1",
+      "partitions": 12,
+      "replication_factor": 1,
+      "config": {
+        "retention.ms": "259200000",
+        "cleanup.policy": "delete",
+        "segment.bytes": "1073741824",
+        "message.max.bytes": "10485760",
+        "min.insync.replicas": "1"
+      }
+    },
+    {
+      "name": "payments.decisions.v1",
+      "partitions": 12,
+      "replication_factor": 1,
+      "config": {
+        "retention.ms": "259200000",
+        "cleanup.policy": "delete",
+        "min.insync.replicas": "1"
+      }
+    },
+    {
+      "name": "fraud.alerts.v1",
+      "partitions": 6,
+      "replication_factor": 1,
+      "config": {
+        "retention.ms": "2592000000",
+        "cleanup.policy": "compact",
+        "min.insync.replicas": "1"
+      }
+    },
+    {
+      "name": "fraud.dlq.v1",
+      "partitions": 6,
+      "replication_factor": 1,
+      "config": {
+        "retention.ms": "-1",
+        "cleanup.policy": "delete",
+        "min.insync.replicas": "1"
+      }
+    }
+  ]
+}

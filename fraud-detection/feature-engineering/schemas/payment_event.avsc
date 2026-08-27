@@ -1,0 +1,96 @@
+{
+  "namespace": "com.bank.fraud.events",
+  "type": "record",
+  "name": "PaymentEvent",
+  "doc": "Real-time payment event ingested from banking payment gateway",
+  "fields": [
+    {
+      "name": "event_id",
+      "type": "string",
+      "doc": "UUID v4, unique idempotency key"
+    },
+    {
+      "name": "timestamp_ms",
+      "type": "long",
+      "doc": "Unix epoch milliseconds"
+    },
+    {
+      "name": "account_id",
+      "type": "string",
+      "doc": "Bank account identifier"
+    },
+    {
+      "name": "card_id",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "Tokenized card identifier"
+    },
+    {
+      "name": "amount",
+      "type": {
+        "type": "bytes",
+        "logicalType": "decimal",
+        "precision": 18,
+        "scale": 2
+      },
+      "doc": "Transaction amount in smallest currency unit"
+    },
+    {
+      "name": "currency",
+      "type": "string",
+      "doc": "ISO 4217 currency code"
+    },
+    {
+      "name": "merchant_id",
+      "type": "string",
+      "doc": "Merchant identifier"
+    },
+    {
+      "name": "merchant_category_code",
+      "type": "int",
+      "doc": "MCC code (ISO 18245)"
+    },
+    {
+      "name": "channel",
+      "type": {
+        "type": "enum",
+        "name": "Channel",
+        "symbols": ["POS", "ATM", "CNP", "MOBILE", "WEB"],
+        "doc": "Transaction channel"
+      },
+      "doc": "How the transaction was initiated"
+    },
+    {
+      "name": "country_code",
+      "type": "string",
+      "doc": "ISO 3166-1 alpha-2 country code"
+    },
+    {
+      "name": "ip_address",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "Source IP address (hashed for PII compliance)"
+    },
+    {
+      "name": "device_id",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "Device fingerprint identifier"
+    },
+    {
+      "name": "geolocation",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "lat,lon pair or null"
+    },
+    {
+      "name": "metadata",
+      "type": {
+        "type": "map",
+        "values": "string"
+      },
+      "default": {},
+      "doc": "Additional key-value metadata"
+    }
+  ]
+}
