@@ -302,6 +302,62 @@ Scorer.Score(tx_id, features)
 
 The key insight: **XGBoost's JSON is self-contained**. Each tree stores split rules as parallel arrays (`split_indices[i]`, `split_conditions[i]`, `left_children[i]`, `right_children[i]`, `base_weights[i]`). Go compiles these into fast pointer-walking trees — no Python runtime needed at serving time.
 
+### Python Fraud Service (Alternative Implementation)
+
+A complete Python implementation exists at `fraud-service-python/` that mirrors the Go service module-for-module. Both produce identical results:
+
+```
+Go:    [LEGIT] prob=0.000050 → APPROVE
+Python: [LEGIT] prob=0.000050 → APPROVE
+
+Go:    [FRAUD] prob=0.999987 → DECLINE
+Python: [FRAUD] prob=0.999987 → DECLINE
+```
+
+#### Module Mapping: Go → Python
+
+| Go Module | Python Module | Purpose |
+|-----------|--------------|--------|
+| `internal/config/config.go` | `app/config.py` | YAML config + env overrides |
+| `internal/scoring/model.go` | `app/scoring.py` | XGBoost JSON parser, scaler, prediction |
+| `internal/scoring/scorer.go` | `app/scoring.py` | Decision classification, reason codes |
+| `internal/rules/rules.go` | `app/rules.py` | 6 rules (country, velocity, travel, amount, emulator, device) |
+| `internal/resilience/circuit_breaker.go` | `app/resilience.py` | 3-state circuit breaker + Prometheus metrics |
+| `internal/resilience/retry.go` | `app/resilience.py` | Exponential backoff + jitter |
+| `internal/resilience/fallback.go` | `app/resilience.py` | Default feature vector (30 features, REVIEW fallback) |
+| `internal/grpc/server.go` | `app/server.py` | gRPC server (ScoreTransaction, HealthCheck, GetDecision) |
+| `cmd/server/main.go` | `app/main.py` | Startup, metrics endpoint, graceful shutdown |
+
+#### Go vs Python: When to Use Which
+
+| Aspect | Go | Python |
+|--------|-----|--------|
+| **Latency** | ~0.5ms per score | ~2-5ms per score |
+| **Concurrency** | goroutines + sync.RWMutex | threading + RLock |
+| **gRPC** | Native grpc-go | grpcio (same protocol) |
+| **Binary** | Single static binary (~15 MB) | Python runtime + deps (~200 MB) |
+| **Deployment** | `COPY binary` in Dockerfile | `pip install` + source code |
+| **Use case** | Production serving (latency-critical) | Prototyping, batch scoring, ML experimentation |
+| **Model loading** | Custom JSON parser (manual tree walk) | Same JSON parser (dict-based) |
+| **Resilience** | Same patterns (CB + retry + fallback) | Same patterns (CB + retry + fallback) |
+
+#### Python Service Architecture
+
+```
+fraud-service-python/
+├── Dockerfile
+├── requirements.txt
+└── app/
+    ├── config.py          # YAML config + env overrides
+    ├── scoring.py         # XGBoost model + scaler + scorer
+    ├── rules.py           # Rules engine (6 rules)
+    ├── resilience.py      # Circuit breaker + retry + fallback
+    ├── server.py          # gRPC server
+    └── main.py            # Startup + metrics + shutdown
+```
+
+**Key design decision:** Both services share the same model artifacts (`fraud_xgboost_v1.0.0.json`, `scaler_v1.0.0.json`), the same feature names (30 features), the same thresholds (0.30/0.70), and the same fallback behavior (REVIEW on failure). They are interchangeable — you can switch between them by changing the Docker image in your Helm chart.
+
 ### Model Artifact Lifecycle
 
 ```
