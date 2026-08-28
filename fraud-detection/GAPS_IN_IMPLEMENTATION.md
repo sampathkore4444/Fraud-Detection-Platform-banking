@@ -63,7 +63,7 @@ When asked "is this production-grade?", I systematically checked 10 areas that m
 
 ---
 
-### 5. Resilience — "What happens when Redis or gRPC fails?"
+### 5. Resilience — "What happens when Redis or gRPC fails?" (Solved)
 
 **What I checked:** Searched for `circuit breaker`, `retry`, `backoff`, `timeout`, `rate limit`.
 
@@ -73,7 +73,7 @@ When asked "is this production-grade?", I systematically checked 10 areas that m
 
 ---
 
-### 6. Data Pipeline — "Do the Flink jobs actually run?"
+### 6. Data Pipeline — "Do the Flink jobs actually run?" (Solved but pls cross check)
 
 **What I checked:** Read through `velocity_features.py`, `behavioral_features.py`, `device_features.py`, and `pipeline.py`.
 
