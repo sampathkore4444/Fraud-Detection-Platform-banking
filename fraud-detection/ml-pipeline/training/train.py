@@ -505,10 +505,25 @@ class FraudModelTrainer:
             json.dump(metadata, f, indent=2)
         logger.info(f"Metadata exported to {metadata_path}")
 
-        # Export scaler
-        scaler_path = os.path.join(output_dir, f"scaler_{version}.pkl")
-        with open(scaler_path, "wb") as f:
+        # Export scaler as JSON (for Go Fraud Service consumption)
+        scaler_json_path = os.path.join(output_dir, f"scaler_{version}.json")
+        scaler_data = {
+            "version": version,
+            "feature_names": FEATURE_NAMES,
+            "mean": self.scaler.mean_.tolist(),
+            "std": self.scaler.scale_.tolist(),
+            "var": self.scaler.var_.tolist(),
+            "n_features": len(FEATURE_NAMES),
+        }
+        with open(scaler_json_path, "w") as f:
+            json.dump(scaler_data, f, indent=2)
+        logger.info(f"Scaler exported to {scaler_json_path}")
+
+        # Also export as pickle for Python-side use (drift monitor, batch scoring)
+        scaler_pkl_path = os.path.join(output_dir, f"scaler_{version}.pkl")
+        with open(scaler_pkl_path, "wb") as f:
             pickle.dump(self.scaler, f)
+        logger.info(f"Scaler (pickle) exported to {scaler_pkl_path}")
 
         return model_path
 

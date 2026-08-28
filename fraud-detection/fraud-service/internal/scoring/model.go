@@ -6,57 +6,149 @@ import (
 	"math"
 	"os"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
 )
 
-// Model wraps an XGBoost model loaded from a JSON file.
-// In production, this would use the native XGBoost Go bindings or ONNX Runtime.
+// ─── Scaler (Python → Go bridge) ─────────────────────────────────────────────
+
+// ScalerParams holds StandardScaler parameters exported from Python training.
+// Applied as: scaled = (raw - mean) / std
+type ScalerParams struct {
+	Version      string    `json:"version"`
+	FeatureNames []string  `json:"feature_names"`
+	Mean         []float64 `json:"mean"`
+	Std          []float64 `json:"std"`
+	Var          []float64 `json:"var"`
+	NFeatures    int       `json:"n_features"`
+}
+
+// ─── XGBoost Native JSON Format ──────────────────────────────────────────────
+//
+// XGBoost exports models as JSON with this structure:
+//
+//	{
+//	  "learner": {
+//	    "learner_model_param": { "base_score": "0.5", "num_feature": "30" },
+//	    "gradient_booster": {
+//	      "model": {
+//	        "trees": [
+//	          {
+//	            "split_indices":    [1, 5, 18, ...],   // feature index per node
+//	            "split_conditions": [0.21, 0.94, ...],  // threshold per node
+//	            "left_children":    [1, 3, 5, ...],     // left child index (-1 = leaf)
+//	            "right_children":   [2, 4, 6, ...],     // right child index (-1 = leaf)
+//	            "base_weights":     [0.0, -1.97, ...],  // leaf value (only for leaf nodes)
+//	            "tree_param":       { "num_nodes": "19" }
+//	          },
+//	          ...
+//	        ]
+//	      }
+//	    }
+//	  }
+//	}
+//
+// Each tree uses PARALLEL ARRAYS (not nested objects). Node i has:
+//   - split_indices[i]    = feature index to split on
+//   - split_conditions[i] = threshold value
+//   - left_children[i]    = index of left child (-1 if leaf)
+//   - right_children[i]   = index of right child (-1 if leaf)
+//   - base_weights[i]     = output value (meaningful only for leaf nodes)
+
+// xgboostModel represents the full XGBoost JSON structure.
+type xgboostModel struct {
+	Learner xgboostLearner `json:"learner"`
+}
+
+type xgboostLearner struct {
+	ModelParam    xgboostModelParam    `json:"learner_model_param"`
+	GradientBoost xgboostGradientBoost `json:"gradient_booster"`
+}
+
+type xgboostModelParam struct {
+	BaseScore  string `json:"base_score"`
+	NumFeature string `json:"num_feature"`
+	NumClass   string `json:"num_class"`
+}
+
+type xgboostGradientBoost struct {
+	Model xgboostGBModel `json:"model"`
+}
+
+type xgboostGBModel struct {
+	Trees []xgboostTree `json:"trees"`
+}
+
+// xgboostTree is the raw XGBoost tree with parallel arrays.
+type xgboostTree struct {
+	SplitIndices    []int     `json:"split_indices"`
+	SplitConditions []float64 `json:"split_conditions"`
+	LeftChildren    []int     `json:"left_children"`
+	RightChildren   []int     `json:"right_children"`
+	BaseWeights     []float64 `json:"base_weights"`
+	TreeParam       struct {
+		NumNodes string `json:"num_nodes"`
+	} `json:"tree_param"`
+}
+
+// ─── Compiled Model (optimized for inference) ────────────────────────────────
+
+// compiledNode is a single node in the compiled decision tree.
+type compiledNode struct {
+	FeatureIdx int
+	Threshold  float64
+	Left       int // index into nodes array, -1 = leaf
+	Right      int // index into nodes array, -1 = leaf
+	Value      float64
+	IsLeaf     bool
+}
+
+// compiledTree is a single decision tree compiled for fast inference.
+type compiledTree struct {
+	Nodes []compiledNode
+}
+
+// Predict walks the tree from root to leaf, returning the leaf value.
+func (t *compiledTree) Predict(features []float64) float64 {
+	if len(t.Nodes) == 0 {
+		return 0
+	}
+	node := &t.Nodes[0]
+	for !node.IsLeaf {
+		if features[node.FeatureIdx] <= node.Threshold {
+			node = &t.Nodes[node.Left]
+		} else {
+			node = &t.Nodes[node.Right]
+		}
+	}
+	return node.Value
+}
+
+// Model wraps an XGBoost model loaded from the native JSON format.
+// This is the production-ready model that parses real XGBoost exports.
 type Model struct {
-	Version     string
-	LoadedAt    time.Time
-	Thresholds  Thresholds
-	features    []string
-	treeEnsemble TreeEnsemble
-	mu          sync.RWMutex
+	Version    string
+	LoadedAt   time.Time
+	Thresholds Thresholds
+	features   []string
+	trees      []compiledTree
+	baseScore  float64 // sigmoid(baseScore) = initial prediction (usually 0.5)
+	numTrees   int
+	scaler     *ScalerParams
+	featureImportance map[string]float64
+	mu         sync.RWMutex
 }
 
 type Thresholds struct {
-	Approve float64 // 0.00 – approve_threshold → APPROVE
-	Review  float64 // approve_threshold – review_threshold → REVIEW
-	Decline float64 // review_threshold – 1.0 → DECLINE
+	Approve float64
+	Review  float64
+	Decline float64
 }
 
-// TreeEnsemble represents a simplified XGBoost model structure.
-// In production, load from native binary or ONNX.
-type TreeEnsemble struct {
-	NumTrees   int       `json:"num_trees"`
-	NumFeatures int      `json:"num_features"`
-	Trees      []Tree    `json:"trees"`
-	Bias       float64   `json:"bias"`
-	ScalePosWeight float64 `json:"scale_pos_weight"`
-	FeatureImportance map[string]float64 `json:"feature_importance"`
-}
-
-type Tree struct {
-	Depth    int       `json:"depth"`
-	Nodes    []Node    `json:"nodes"`
-	Weight   float64   `json:"weight"`
-}
-
-type Node struct {
-	FeatureIdx int     `json:"feature_idx"`
-	Threshold  float64 `json:"threshold"`
-	Left       int     `json:"left"`
-	Right      int     `json:"right"`
-	Value      float64 `json:"value"`
-	IsLeaf     bool    `json:"is_leaf"`
-}
-
-// Default model for demonstration purposes.
-// In production, load from trained model binary.
+// Default feature names (same order as training pipeline).
 var defaultFeatures = []string{
 	"velocity_tx_count_1h",
 	"velocity_tx_count_24h",
@@ -90,99 +182,205 @@ var defaultFeatures = []string{
 	"device_is_new_os_version",
 }
 
-// NewModel creates a model with default thresholds.
+// ─── Model Loading ───────────────────────────────────────────────────────────
+
+// NewModel creates a fallback model with hardcoded rules.
+// Used when no trained model file is available.
 func NewModel() *Model {
 	return &Model{
 		Version:    "v1.0.0",
 		LoadedAt:   time.Now(),
-		Thresholds: Thresholds{
-			Approve: 0.30,
-			Review:  0.70,
-			Decline: 1.00,
-		},
-		features: defaultFeatures,
-		treeEnsemble: TreeEnsemble{
-			NumTrees:    100,
-			NumFeatures: len(defaultFeatures),
-			Bias:        -2.0,
-			FeatureImportance: map[string]float64{
-				"velocity_tx_count_1h":       0.15,
-				"device_is_known":            0.12,
-				"behavioral_amount_zscore":   0.11,
-				"device_ip_country_match":    0.10,
-				"velocity_unique_countries_1h": 0.09,
-			},
+		Thresholds: Thresholds{Approve: 0.30, Review: 0.70, Decline: 1.00},
+		features:   defaultFeatures,
+		baseScore:  0.0,
+		numTrees:   0,
+		featureImportance: map[string]float64{
+			"velocity_tx_count_1h":         0.15,
+			"device_is_known":              0.12,
+			"behavioral_amount_zscore":     0.11,
+			"device_ip_country_match":      0.10,
+			"velocity_unique_countries_1h": 0.09,
 		},
 	}
 }
 
-// LoadModel loads a trained model from a JSON file.
+// LoadModel loads a trained XGBoost model from its native JSON export format.
+//
+// The JSON structure is:
+//
+//	{ "learner": { "gradient_booster": { "model": { "trees": [...] } } } }
+//
+// Each tree uses parallel arrays for nodes (split_indices, split_conditions,
+// left_children, right_children, base_weights).
 func LoadModel(path string) (*Model, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read model file: %w", err)
 	}
 
-	var ensemble TreeEnsemble
-	if err := json.Unmarshal(data, &ensemble); err != nil {
-		return nil, fmt.Errorf("failed to parse model file: %w", err)
+	var xgbModel xgboostModel
+	if err := json.Unmarshal(data, &xgbModel); err != nil {
+		return nil, fmt.Errorf("failed to parse XGBoost JSON: %w", err)
+	}
+
+	// Parse base_score (string like "5E-1" → float64)
+	baseScore := 0.5 // default
+	if bs := xgbModel.Learner.ModelParam.BaseScore; bs != "" {
+		if v, err := strconv.ParseFloat(bs, 64); err == nil {
+			baseScore = v
+		}
+	}
+
+	// Compile trees from parallel arrays to pointer-based trees
+	rawTrees := xgbModel.Learner.GradientBoost.Model.Trees
+	compiled := make([]compiledTree, len(rawTrees))
+	totalNodes := 0
+
+	for i, raw := range rawTrees {
+		n := len(raw.SplitIndices)
+		nodes := make([]compiledNode, n)
+		for j := 0; j < n; j++ {
+			left := raw.LeftChildren[j]
+			right := raw.RightChildren[j]
+			isLeaf := left == -1 && right == -1
+
+			nodes[j] = compiledNode{
+				FeatureIdx: raw.SplitIndices[j],
+				Threshold:  raw.SplitConditions[j],
+				Left:       left,
+				Right:      right,
+				Value:      raw.BaseWeights[j],
+				IsLeaf:     isLeaf,
+			}
+		}
+		compiled[i] = compiledTree{Nodes: nodes}
+		totalNodes += n
 	}
 
 	m := &Model{
-		Version:      "v1.0.0",
-		LoadedAt:     time.Now(),
-		Thresholds:   Thresholds{Approve: 0.30, Review: 0.70, Decline: 1.00},
-		features:     defaultFeatures,
-		treeEnsemble: ensemble,
+		Version:    "v1.0.0",
+		LoadedAt:   time.Now(),
+		Thresholds: Thresholds{Approve: 0.30, Review: 0.70, Decline: 1.00},
+		features:   defaultFeatures,
+		trees:      compiled,
+		baseScore:  baseScore,
+		numTrees:   len(compiled),
 	}
 
 	log.Info().
-		Int("num_trees", ensemble.NumTrees).
-		Int("num_features", ensemble.NumFeatures).
-		Msg("Model loaded successfully")
+		Int("num_trees", len(compiled)).
+		Int("total_nodes", totalNodes).
+		Float64("base_score", baseScore).
+		Msg("XGBoost model loaded successfully")
 
 	return m, nil
 }
 
-// Predict computes fraud probability from feature vector.
-// Returns probability [0, 1] and top feature contributions.
+// ─── Scaler Loading ──────────────────────────────────────────────────────────
+
+// LoadScaler loads StandardScaler parameters from the JSON exported by Python.
+func LoadScaler(path string) (*ScalerParams, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read scaler file: %w", err)
+	}
+
+	var scaler ScalerParams
+	if err := json.Unmarshal(data, &scaler); err != nil {
+		return nil, fmt.Errorf("failed to parse scaler file: %w", err)
+	}
+
+	if len(scaler.Mean) != len(scaler.Std) {
+		return nil, fmt.Errorf("scaler mean/std length mismatch: %d vs %d", len(scaler.Mean), len(scaler.Std))
+	}
+
+	log.Info().
+		Str("version", scaler.Version).
+		Int("n_features", scaler.NFeatures).
+		Msg("Scaler loaded successfully")
+
+	return &scaler, nil
+}
+
+// SetScaler attaches a loaded ScalerParams to the Model.
+func (m *Model) SetScaler(scaler *ScalerParams) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.scaler = scaler
+	log.Info().Str("version", scaler.Version).Msg("Scaler attached to model")
+}
+
+// NumTrees returns the number of trees in the ensemble.
+func (m *Model) NumTrees() int {
+	return m.numTrees
+}
+
+// BaseScore returns the base score (initial prediction before trees).
+func (m *Model) BaseScore() float64 {
+	return m.baseScore
+}
+
+// ─── Prediction ──────────────────────────────────────────────────────────────
+//
+// The inference pipeline is:
+//
+//	1. Extract raw features from map[string]string → []float64
+//	2. Apply StandardScaler: (x - μ) / σ
+//	3. Sum tree predictions: logit = Σ tree_i.predict(scaled_features)
+//	4. Add base_score: logit += base_score
+//	5. Apply sigmoid: probability = 1 / (1 + exp(-logit))
+//
+// This matches exactly what XGBoost does internally:
+//
+//	predict = base_score + Σ tree_i(features)
+//	probability = sigmoid(predict)
+
+// Predict computes fraud probability from a feature vector.
+// Returns probability [0, 1] and top feature contributions for explainability.
 func (m *Model) Predict(features map[string]string) (float64, map[string]float64) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// Convert string features to float values
-	floatFeatures := m.extractFeatures(features)
+	// Step 1: Extract raw feature values
+	rawFeatures := m.extractFeatures(features)
 
-	// Compute score using logistic function on tree ensemble
-	logit := m.treeEnsemble.Bias
+	// Step 2: Apply StandardScaler normalization (matches Python training)
+	scaledFeatures := m.scaleFeatures(rawFeatures)
 
-	// Simplified tree scoring — in production use native XGBoost
-	for _, tree := range m.treeEnsemble.Trees {
-		logit += tree.Predict(floatFeatures) * tree.Weight
+	// Step 3: Sum predictions from all trees
+	logit := m.baseScore
+	for i := range m.trees {
+		logit += m.trees[i].Predict(scaledFeatures)
 	}
 
-	// Apply logistic sigmoid
+	// Step 4: Apply sigmoid to get probability
 	probability := sigmoid(logit)
-
-	// Clamp to [0, 1]
 	probability = math.Max(0.0, math.Min(1.0, probability))
 
-	// Compute feature contributions for explainability
-	topFeatures := m.computeFeatureContributions(floatFeatures)
+	// Step 5: Compute feature contributions for explainability
+	topFeatures := m.computeFeatureContributions(rawFeatures)
 
 	return probability, topFeatures
 }
 
-// PredictRaw returns the raw logit without sigmoid (for debugging).
+// PredictRaw returns the raw logit before sigmoid (for debugging).
 func (m *Model) PredictRaw(features map[string]string) float64 {
-	floatFeatures := m.extractFeatures(features)
-	logit := m.treeEnsemble.Bias
-	for _, tree := range m.treeEnsemble.Trees {
-		logit += tree.Predict(floatFeatures) * tree.Weight
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	rawFeatures := m.extractFeatures(features)
+	scaledFeatures := m.scaleFeatures(rawFeatures)
+
+	logit := m.baseScore
+	for i := range m.trees {
+		logit += m.trees[i].Predict(scaledFeatures)
 	}
 	return logit
 }
 
+// ─── Feature Processing ──────────────────────────────────────────────────────
+
+// extractFeatures converts the string-valued feature map to a float64 array.
 func (m *Model) extractFeatures(features map[string]string) []float64 {
 	vals := make([]float64, len(m.features))
 	for i, name := range m.features {
@@ -193,9 +391,29 @@ func (m *Model) extractFeatures(features map[string]string) []float64 {
 	return vals
 }
 
+// scaleFeatures applies StandardScaler: (x - mean) / std
+func (m *Model) scaleFeatures(raw []float64) []float64 {
+	if m.scaler == nil {
+		return raw
+	}
+	scaled := make([]float64, len(raw))
+	for i, v := range raw {
+		std := m.scaler.Std[i]
+		if std > 1e-10 {
+			scaled[i] = (v - m.scaler.Mean[i]) / std
+		} else {
+			scaled[i] = 0.0
+		}
+	}
+	return scaled
+}
+
+// computeFeatureContributions estimates each feature's contribution to the score.
 func (m *Model) computeFeatureContributions(features []float64) map[string]float64 {
 	contributions := make(map[string]float64)
-	for name, importance := range m.treeEnsemble.FeatureImportance {
+	// Simple contribution: importance × scaled feature value
+	// In production, use SHAP values via native XGBoost bindings
+	for name, importance := range m.featureImportance {
 		for i, fname := range m.features {
 			if fname == name {
 				contributions[name] = importance * features[i]
@@ -206,7 +424,7 @@ func (m *Model) computeFeatureContributions(features []float64) map[string]float
 	return contributions
 }
 
-// GetTopFeatures returns the top N features by importance.
+// GetTopFeatures returns the top N features by absolute contribution.
 func (m *Model) GetTopFeatures(features map[string]string, n int) map[string]float64 {
 	_, topFeatures := m.Predict(features)
 
@@ -233,25 +451,10 @@ func (m *Model) GetTopFeatures(features map[string]string, n int) map[string]flo
 	return result
 }
 
-// sigmoid applies the logistic function.
+// ─── Utilities ───────────────────────────────────────────────────────────────
+
 func sigmoid(x float64) float64 {
 	return 1.0 / (1.0 + math.Exp(-x))
-}
-
-// Tree.Predict evaluates a single tree on features.
-func (t Tree) Predict(features []float64) float64 {
-	if len(t.Nodes) == 0 {
-		return 0
-	}
-	node := t.Nodes[0]
-	for !node.IsLeaf {
-		if features[node.FeatureIdx] <= node.Threshold {
-			node = t.Nodes[node.Left]
-		} else {
-			node = t.Nodes[node.Right]
-		}
-	}
-	return node.Value
 }
 
 func parseFloat(s string) float64 {

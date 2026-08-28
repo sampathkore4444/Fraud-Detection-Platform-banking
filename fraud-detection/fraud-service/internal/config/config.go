@@ -42,11 +42,12 @@ type RedisConfig struct {
 }
 
 type ModelConfig struct {
-	Path        string        `yaml:"path"`
-	Version     string        `yaml:"version"`
-	HotReload   bool          `yaml:"hot_reload"`
+	Path          string        `yaml:"path"`
+	ScalerPath    string        `yaml:"scaler_path"` // JSON scaler from Python training
+	Version       string        `yaml:"version"`
+	HotReload     bool          `yaml:"hot_reload"`
 	CheckInterval time.Duration `yaml:"check_interval"`
-	MaxFeatures int           `yaml:"max_features"`
+	MaxFeatures   int           `yaml:"max_features"`
 }
 
 type RulesConfig struct {
@@ -89,6 +90,7 @@ func Load(path string) (*Config, error) {
 		},
 		Model: ModelConfig{
 			Path:          "models/fraud_xgboost.json",
+			ScalerPath:    "models/scaler_v1.0.0.json",
 			Version:       "v1.0.0",
 			HotReload:     true,
 			CheckInterval: 30 * time.Second,

@@ -2,11 +2,12 @@ package grpc
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
+	"github.com/bank/fraud-detection/fraud-service/internal/resilience"
 	"github.com/bank/fraud-detection/fraud-service/internal/scoring"
-	"github.com/go-redis/redis/v8"
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -18,12 +19,18 @@ import (
 type FraudServer struct {
 	pb.UnimplementedFraudScoringServiceServer
 	scorer    *scoring.Scorer
-	redis     *redis.Client
+	redis     ResilientRedisClient // ResilientRedis wrapper
 	startTime time.Time
 }
 
-// NewFraudServer creates a new FraudServer.
-func NewFraudServer(scorer *scoring.Scorer, redisClient *redis.Client) *FraudServer {
+// ResilientRedisClient is the interface for Redis operations with resilience.
+type ResilientRedisClient interface {
+	GetFeatureVector(ctx context.Context, key string) (map[string]string, error)
+	Ping(ctx context.Context) error
+}
+
+// NewFraudServer creates a new FraudServer with resilience.
+func NewFraudServer(scorer *scoring.Scorer, redisClient ResilientRedisClient) *FraudServer {
 	return &FraudServer{
 		scorer:    scorer,
 		redis:     redisClient,
@@ -32,6 +39,13 @@ func NewFraudServer(scorer *scoring.Scorer, redisClient *redis.Client) *FraudSer
 }
 
 // ScoreTransaction evaluates a single transaction for fraud.
+//
+// Resilience flow:
+//  1. Validate input
+//  2. Load feature vector from Redis (with circuit breaker + retry + fallback)
+//  3. Score via XGBoost model
+//  4. Apply rules engine override
+//  5. Return decision
 func (s *FraudServer) ScoreTransaction(ctx context.Context, req *pb.ScoreRequest) (*pb.ScoreResponse, error) {
 	if req.TransactionId == "" {
 		return nil, status.Error(codes.InvalidArgument, "transaction_id is required")
@@ -39,16 +53,17 @@ func (s *FraudServer) ScoreTransaction(ctx context.Context, req *pb.ScoreRequest
 
 	start := time.Now()
 
-	// Try to load feature vector from Redis if not provided
+	// Try to load feature vector from Redis (with resilience)
 	features := req.Features
 	if len(features) == 0 {
-		loaded, err := s.loadFeatureVector(ctx, req.TransactionId)
+		loaded, err := s.redis.GetFeatureVector(ctx, "feature_vector:"+req.TransactionId)
 		if err != nil {
+			// This shouldn't happen now (fallback returns defaults), but handle anyway
 			log.Warn().
 				Str("tx_id", req.TransactionId).
 				Err(err).
-				Msg("Failed to load feature vector from Redis, using empty features")
-			features = make(map[string]string)
+				Msg("Failed to load feature vector, using defaults")
+			features = resilience.DefaultFeatureVector()
 		} else {
 			features = loaded
 		}
@@ -82,30 +97,38 @@ func (s *FraudServer) GetDecision(ctx context.Context, req *pb.StringRequest) (*
 		return nil, status.Error(codes.InvalidArgument, "transaction_id is required")
 	}
 
-	// Look up decision from Redis
+	// Look up decision from Redis (with resilience)
 	key := "decision:" + req.Value
-	val, err := s.redis.Get(ctx, key).Result()
-	if err == redis.Nil {
+	decisionMap, err := s.redis.GetFeatureVector(ctx, key)
+	if err != nil || len(decisionMap) == 0 {
 		return nil, status.Errorf(codes.NotFound, "decision not found for transaction %s", req.Value)
 	}
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to retrieve decision: %v", err)
-	}
 
-	// Parse stored decision (simplified — in production use protobuf serialization)
-	_ = val // Would deserialize here
+	// Parse decision from the map
+	decisionStr := decisionMap["decision"]
+	var decision pb.Decision
+	switch decisionStr {
+	case "APPROVE":
+		decision = pb.Decision_APPROVE
+	case "REVIEW":
+		decision = pb.Decision_REVIEW
+	case "DECLINE":
+		decision = pb.Decision_DECLINE
+	default:
+		decision = pb.Decision_APPROVE
+	}
 
 	return &pb.DecisionResponse{
 		TransactionId: req.Value,
-		Decision:      pb.Decision_APPROVE,
+		Decision:      decision,
 		TimestampMs:   time.Now().UnixMilli(),
 	}, nil
 }
 
 // HealthCheck returns service health and model version.
 func (s *FraudServer) HealthCheck(ctx context.Context, req *pb.Empty) (*pb.HealthResponse, error) {
-	// Check Redis connectivity
-	redisHealthy := s.redis.Ping(ctx).Err() == nil
+	// Check Redis connectivity (with short timeout)
+	redisHealthy := s.redis.Ping(ctx) == nil
 
 	return &pb.HealthResponse{
 		Healthy:         redisHealthy,
@@ -125,9 +148,9 @@ func (s *FraudServer) ScoreBatch(stream pb.FraudScoringService_ScoreBatchServer)
 
 		features := req.Features
 		if len(features) == 0 {
-			loaded, loadErr := s.loadFeatureVector(stream.Context(), req.TransactionId)
+			loaded, loadErr := s.redis.GetFeatureVector(stream.Context(), "feature_vector:"+req.TransactionId)
 			if loadErr != nil {
-				features = make(map[string]string)
+				features = resilience.DefaultFeatureVector()
 			} else {
 				features = loaded
 			}
@@ -156,22 +179,6 @@ func (s *FraudServer) ScoreBatch(stream pb.FraudScoringService_ScoreBatchServer)
 	}
 }
 
-func (s *FraudServer) loadFeatureVector(ctx context.Context, txID string) (map[string]string, error) {
-	key := "feature_vector:" + txID
-	val, err := s.redis.Get(ctx, key).Result()
-	if err != nil {
-		return nil, fmt.Errorf("redis get failed: %w", err)
-	}
-
-	// Parse JSON feature vector
-	features := make(map[string]string)
-	if err := jsonUnmarshal([]byte(val), &features); err != nil {
-		return nil, fmt.Errorf("failed to parse feature vector: %w", err)
-	}
-
-	return features, nil
-}
-
 func decisionToProto(d scoring.Decision) pb.Decision {
 	switch d {
 	case scoring.DecisionApprove:
@@ -185,13 +192,9 @@ func decisionToProto(d scoring.Decision) pb.Decision {
 	}
 }
 
-// jsonUnmarshal is a minimal JSON parser for map[string]string.
-// In production, use encoding/json.
 func jsonUnmarshal(data []byte, v *map[string]string) error {
-	// Simplified JSON parser for flat key-value maps
-	// In production use encoding/json
-	import_json := string(data)
-	_ = import_json
-	// For now, return empty — real implementation uses encoding/json
-	return nil
+	return json.Unmarshal(data, v)
 }
+
+// Ensure we use fmt to avoid import cycle issues.
+var _ = fmt.Sprintf

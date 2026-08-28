@@ -1,6 +1,6 @@
 {
   "version": "v1.0.0",
-  "trained_at": "2026-08-27T10:37:46.622479",
+  "trained_at": "2026-08-28T02:08:55.729779",
   "num_features": 30,
   "feature_names": [
     "velocity_tx_count_1h",

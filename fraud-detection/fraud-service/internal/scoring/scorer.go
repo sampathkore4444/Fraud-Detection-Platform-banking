@@ -58,20 +58,36 @@ const (
 	ReasonCodeBlockedCountry       = "BLOCKED_COUNTRY"
 )
 
+// RulesEvaluator is the interface that the rules engine must satisfy.
+// Decouples scoring from the rules package to avoid circular imports.
+type RulesEvaluator interface {
+	Evaluate(features map[string]string) (Decision, string)
+}
+
 // Scorer orchestrates model prediction and rule-based fallback.
 type Scorer struct {
 	model     *Model
-	rules     *RulesEngine
+	rules     RulesEvaluator
 	thresholds Thresholds
 }
 
 // NewScorer creates a new Scorer with the given model and rules.
-func NewScorer(model *Model, rules *RulesEngine) *Scorer {
+func NewScorer(model *Model, rules RulesEvaluator) *Scorer {
 	return &Scorer{
 		model:      model,
 		rules:      rules,
 		thresholds: model.Thresholds,
 	}
+}
+
+// ModelVersion returns the current model version string.
+func (s *Scorer) ModelVersion() string {
+	return s.model.Version
+}
+
+// ModelLoadedAt returns the timestamp when the model was loaded.
+func (s *Scorer) ModelLoadedAt() time.Time {
+	return s.model.LoadedAt
 }
 
 // Score evaluates a transaction and returns a ScoreResult.

@@ -16,6 +16,7 @@ import (
 
 	"github.com/bank/fraud-detection/fraud-service/internal/config"
 	fgrpc "github.com/bank/fraud-detection/fraud-service/internal/grpc"
+	"github.com/bank/fraud-detection/fraud-service/internal/resilience"
 	"github.com/bank/fraud-detection/fraud-service/internal/rules"
 	"github.com/bank/fraud-detection/fraud-service/internal/scoring"
 	fraudpb "github.com/bank/fraud-detection/fraud-service/proto"
@@ -41,7 +42,7 @@ func main() {
 		Float64("review_threshold", cfg.Scoring.ReviewThreshold).
 		Msg("Configuration loaded")
 
-	// ── Load Model ────────────────────────────────────────────
+	// ── Load Model + Scaler ────────────────────────────────────
 	var model *scoring.Model
 	if _, err := os.Stat(cfg.Model.Path); err == nil {
 		model, err = scoring.LoadModel(cfg.Model.Path)
@@ -55,6 +56,21 @@ func main() {
 	}
 	model.Version = cfg.Model.Version
 
+	// Load the StandardScaler from Python training pipeline.
+	// This is critical: the model was trained on scaled features,
+	// so we must apply the same normalization at serving time.
+	if _, err := os.Stat(cfg.Model.ScalerPath); err == nil {
+		scaler, err := scoring.LoadScaler(cfg.Model.ScalerPath)
+		if err != nil {
+			log.Warn().Err(err).Msg("Failed to load scaler — serving with raw features (training-serving skew risk!)")
+		} else {
+			model.SetScaler(scaler)
+			log.Info().Str("path", cfg.Model.ScalerPath).Msg("Scaler loaded — features will be normalized before inference")
+		}
+	} else {
+		log.Warn().Str("path", cfg.Model.ScalerPath).Msg("No scaler file found — serving with raw features (training-serving skew risk!)")
+	}
+
 	// ── Initialize Rules Engine ───────────────────────────────
 	rulesEngine := rules.NewRulesEngine(rules.RulesConfig{
 		Enabled:            cfg.Rules.Enabled,
@@ -65,11 +81,12 @@ func main() {
 	})
 
 	// ── Initialize Scorer ─────────────────────────────────────
-	scorer := scoring.NewScorer(model, rulesEngine)
-	_ = scorer // Will be passed to gRPC server
+	// Wrap rules engine to satisfy scoring.RulesEvaluator interface
+	rulesAdapter := &rulesEngineAdapter{engine: rulesEngine}
+	scorer := scoring.NewScorer(model, rulesAdapter)
 
-	// ── Connect to Redis ──────────────────────────────────────
-	redisClient := redis.NewClient(&redis.Options{
+	// ── Connect to Redis (with resilience) ─────────────────────
+	rawRedisClient := redis.NewClient(&redis.Options{
 		Addr:         cfg.Redis.Addr,
 		Password:     cfg.Redis.Password,
 		DB:           cfg.Redis.DB,
@@ -81,11 +98,20 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := redisClient.Ping(ctx).Err(); err != nil {
+	if err := rawRedisClient.Ping(ctx).Err(); err != nil {
 		log.Warn().Err(err).Msg("Failed to connect to Redis — running in degraded mode")
 	} else {
 		log.Info().Str("addr", cfg.Redis.Addr).Msg("Connected to Redis")
 	}
+
+	// Wrap Redis with circuit breaker + retry + fallback
+	redisCB := resilience.NewCircuitBreaker(resilience.CircuitBreakerConfig{
+		Name:             "redis",
+		FailureThreshold: 5,    // 5 consecutive failures → OPEN
+		SuccessThreshold: 3,    // 3 consecutive successes → CLOSED
+		Timeout:          30 * time.Second, // wait 30s before probing
+	})
+	resilientRedis := resilience.NewResilientRedis(rawRedisClient, redisCB)
 
 	// ── Start gRPC Server ────────────────────────────────────
 	grpcAddr := fmt.Sprintf(":%d", cfg.Server.GRPCPort)
@@ -103,7 +129,7 @@ func main() {
 	)
 
 	// Register services
-	fraudServer := fgrpc.NewFraudServer(scorer, redisClient)
+	fraudServer := fgrpc.NewFraudServer(scorer, resilientRedis)
 	fraudpb.RegisterFraudScoringServiceServer(grpcServer, fraudServer)
 
 	// Health check
@@ -158,7 +184,7 @@ func main() {
 	defer shutdownCancel()
 	metricsServer.Shutdown(shutdownCtx)
 
-	redisClient.Close()
+	rawRedisClient.Close()
 
 	log.Info().Msg("Fraud service stopped")
 }
@@ -197,4 +223,16 @@ func recoveryInterceptor(
 		}
 	}()
 	return handler(ctx, req)
+}
+
+// rulesEngineAdapter wraps rules.RulesEngine to satisfy scoring.RulesEvaluator.
+// Converts rules.Decision → scoring.Decision.
+type rulesEngineAdapter struct {
+	engine *rules.RulesEngine
+}
+
+func (a *rulesEngineAdapter) Evaluate(features map[string]string) (scoring.Decision, string) {
+	decision, reason := a.engine.Evaluate(features)
+	// rules.Decision and scoring.Decision are both int enums with the same values
+	return scoring.Decision(decision), reason
 }
