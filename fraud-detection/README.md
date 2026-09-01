@@ -29,13 +29,21 @@ See [docs/architecture.md](docs/architecture.md) for full architecture details.
 # Start infrastructure (Kafka, Redis, Flink)
 docker-compose up -d
 
-# Run Fraud Service locally
+# Run Fraud Service (Go) locally
 cd fraud-service
 go run cmd/server/main.go
+
+# OR Run Fraud Service (Python) locally
+cd fraud-service-python
+python -m app.main
 
 # Run ML training pipeline
 cd ml-pipeline
 python training/train.py --data data/training_data.csv --version v1.0.0
+
+# Run Admin Portal
+cd admin-portal/api && uvicorn app:app --reload --port 8000
+cd admin-portal/frontend && npm start
 
 # Run feature validation
 python feature-engineering/validation/feature_validator.py
@@ -73,10 +81,27 @@ fraud-detection/
 │   ├── internal/            # Internal packages
 │   │   ├── scoring/         # XGBoost inference (SPEC §3.5)
 │   │   ├── rules/           # Rule-based fallback (SPEC §6)
+│   │   ├── resilience/      # Circuit breaker, retry, fallback
 │   │   ├── grpc/            # gRPC handlers
 │   │   └── config/          # Configuration
 │   ├── proto/               # Protobuf definitions (SPEC §3.4)
 │   └── models/              # Trained model binaries
+├── fraud-service-python/    # Python gRPC scoring service (alternative)
+│   ├── app/
+│   │   ├── scoring.py       # XGBoost inference (same model as Go)
+│   │   ├── rules.py         # Rule-based fallback (6 rules)
+│   │   ├── resilience.py    # Circuit breaker, retry, fallback
+│   │   ├── server.py        # gRPC server
+│   │   └── config.py        # YAML config + env overrides
+│   ├── Dockerfile
+│   └── requirements.txt
+├── admin-portal/            # Fraud operations dashboard
+│   ├── api/                 # FastAPI backend
+│   │   ├── app.py           # REST API (decisions, models, rules, audit)
+│   │   └── requirements.txt
+│   └── frontend/            # React admin UI
+│       ├── src/App.js       # Dashboard, review queue, models, rules, audit
+│       └── package.json
 ├── feature-engineering/     # Feature schemas & validation
 │   ├── schemas/             # Avro schemas (SPEC §3.1)
 │   ├── validation/          # Feature validation (SPEC §3.2.5)
@@ -93,7 +118,8 @@ fraud-detection/
 ├── docs/                    # Documentation
 │   ├── architecture.md      # Architecture overview
 │   ├── runbook.md           # Operations runbook
-│   └── feature-catalog.md   # Feature documentation
+│   ├── feature-catalog.md   # Feature documentation
+│   └── feature-store-data-model.md  # Redis key patterns & sizing
 └── docker-compose.yml       # Local development environment
 ```
 
@@ -131,8 +157,11 @@ helm upgrade --install fraud-detection \
 ### Docker
 
 ```bash
-# Build Fraud Service
+# Build Fraud Service (Go)
 docker build -f Dockerfile.fraud-service -t fraud-service:latest fraud-service/
+
+# Build Fraud Service (Python)
+docker build -f fraud-service-python/Dockerfile -t fraud-service-python:latest fraud-service-python/
 
 # Build Flink Jobs
 docker build -f Dockerfile.flink-jobs -t flink-jobs:latest .
@@ -158,9 +187,39 @@ Automated pipeline per SPEC §9:
 - SOC 2 Type II
 - Audit logging for all decisions
 
+## Admin Portal
+
+A React + FastAPI admin dashboard for fraud operations:
+
+| Feature | Description |
+|---------|-------------|
+| **Real-time Dashboard** | Fraud rate, latency, approval/decline ratio, queue size |
+| **Decision Review Queue** | Analyst interface to approve/decline REVIEW transactions |
+| **Model Management** | View model versions, metrics, activate/deactivate |
+| **Rules Editor** | Create/edit/disable fraud rules without code deploy |
+| **Audit Trail** | Searchable log of all decisions and analyst actions |
+| **Case Management** | Investigate fraud alerts, assign analysts |
+
+### Admin Portal Quick Start
+
+```bash
+# Backend (FastAPI)
+cd admin-portal/api
+pip install -r requirements.txt
+uvicorn app:app --reload --port 8000
+
+# Frontend (React)
+cd admin-portal/frontend
+npm install
+npm start
+```
+
+See [docs/architecture.md](docs/architecture.md) for the full admin portal architecture.
+
 ## Documentation
 
 - [Architecture](docs/architecture.md)
 - [Runbook](docs/runbook.md)
 - [Feature Catalog](docs/feature-catalog.md)
+- [Feature Store Data Model](docs/feature-store-data-model.md)
 - [API Spec](fraud-service/api/swagger.json)

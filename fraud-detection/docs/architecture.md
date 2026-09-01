@@ -358,6 +358,98 @@ fraud-service-python/
 
 **Key design decision:** Both services share the same model artifacts (`fraud_xgboost_v1.0.0.json`, `scaler_v1.0.0.json`), the same feature names (30 features), the same thresholds (0.30/0.70), and the same fallback behavior (REVIEW on failure). They are interchangeable — you can switch between them by changing the Docker image in your Helm chart.
 
+### Admin Portal (React + FastAPI)
+
+The admin portal provides fraud analysts and operations staff with a web-based interface to manage the fraud detection platform in real-time.
+
+#### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      Admin Portal                                │
+│                                                                  │
+│  ┌──────────────────────────┐  ┌────────────────────────────┐   │
+│  │   React Frontend         │  │   FastAPI Backend           │   │
+│  │   (port 3000)            │  │   (port 8000)               │   │
+│  │                          │  │                              │   │
+│  │  ┌──────────┐            │  │  ┌─────────────────────┐    │   │
+│  │  │Dashboard │            │  │  │ /api/stats           │    │   │
+│  │  └──────────┘            │  │  │ /api/decisions       │    │   │
+│  │  ┌──────────┐            │  │  │ /api/review-queue    │    │   │
+│  │  │Review    │◄───────────┼──┼─►│ /api/models          │    │   │
+│  │  │Queue     │            │  │  │ /api/rules           │    │   │
+│  │  └──────────┘            │  │  │ /api/audit           │    │   │
+│  │  ┌──────────┐            │  │  │ /api/cases           │    │   │
+│  │  │Models    │            │  │  └──────────┬──────────┘    │   │
+│  │  └──────────┘            │  │             │                │   │
+│  │  ┌──────────┐            │  │             ▼                │   │
+│  │  │Rules     │            │  │  ┌─────────────────────┐    │   │
+│  │  └──────────┘            │  │  │  Redis Cluster       │    │   │
+│  │  ┌──────────┐            │  │  │  (decisions, rules,  │    │   │
+│  │  │Audit     │            │  │  │   models, audit)     │    │   │
+│  │  └──────────┘            │  │  └─────────────────────┘    │   │
+│  └──────────────────────────┘  └────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### API Endpoints
+
+| Endpoint | Method | Purpose |
+|----------|--------|--------|
+| `/api/stats` | GET | Real-time dashboard metrics (fraud rate, latency, queue size) |
+| `/api/decisions` | GET | List decisions (filterable by APPROVE/REVIEW/DECLINE) |
+| `/api/decisions/{tx_id}` | GET/PUT | Decision detail + analyst override |
+| `/api/review-queue` | GET/PUT | REVIEW queue + approve/decline actions |
+| `/api/models` | GET | List model versions + metrics |
+| `/api/models/activate` | POST | Activate a model version |
+| `/api/rules` | GET/POST | List + create fraud rules |
+| `/api/rules/{id}` | PUT/DELETE | Update or delete a rule |
+| `/api/rules/{id}/toggle` | PUT | Enable/disable a rule |
+| `/api/audit` | GET | Search audit trail |
+| `/api/cases` | GET/POST | List + create investigation cases |
+| `/api/cases/{id}` | PUT | Update case status |
+| `/api/health` | GET | Health check |
+
+#### Frontend Pages
+
+| Page | Component | Features |
+|------|-----------|----------|
+| **Dashboard** | `Dashboard.js` | 9 stat cards (fraud rate, latency, queue size), decision distribution bar chart |
+| **Review Queue** | `ReviewQueue.js` | Priority-sorted queue, approve/decline buttons with analyst notes |
+| **Decisions** | `Decisions.js` | Filterable table (APPROVE/REVIEW/DECLINE), transaction detail |
+| **Models** | `Models.js` | Version list, metrics, one-click activation |
+| **Rules** | `Rules.js` | Rule table, enable/disable toggle, condition display |
+| **Cases** | `Cases.js` | Investigation cases with status tracking |
+| **Audit Trail** | `AuditTrail.js` | All system actions logged with timestamps |
+
+#### Frontend Structure
+
+```
+admin-portal/
+├── api/
+│   ├── app.py              # FastAPI backend (22 routes)
+│   └── requirements.txt
+└── frontend/
+    ├── package.json
+    ├── public/index.html
+    └── src/
+        ├── index.js         # React entry point
+        ├── App.js           # Main app (10 components, 519 lines)
+        └── App.css          # Dark theme CSS
+```
+
+#### Why a Dedicated Admin Portal?
+
+| Need | Why Not Just Use Grafana/PagerDuty? |
+|------|-------------------------------------|
+| **Decision Review Queue** | Analysts need to approve/decline individual transactions — Grafana can't do this |
+| **Model Management** | Safe model rollouts (canary, activate, rollback) require a purpose-built UI |
+| **Rules Editor** | Business teams need to tune fraud rules without code deploys |
+| **Case Management** | Investigation workflow with evidence attachment and analyst assignment |
+| **Audit Trail** | PCI-DSS auditors need searchable decision history |
+
+> **Design principle:** The admin portal handles the *human operations* layer. Everything else (metrics, alerting, logs) delegates to existing tools (Grafana, PagerDuty, Jaeger) — don't rebuild what's already good.
+
 ### Model Artifact Lifecycle
 
 ```
